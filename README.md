@@ -20,7 +20,6 @@
 internship-report-writing/
 ├── SKILL.md              # 技能主文件（工作流、写作规范、格式规格）
 ├── template.md           # 各章节撰写要点说明
-├── examples.md           # 写作示例（好/坏对比、Mermaid 图样例）
 ├── scripts/
 │   └── build_docx.py     # Markdown 章节 + Word 模板 → 排版好的 .docx
 └── README.md
