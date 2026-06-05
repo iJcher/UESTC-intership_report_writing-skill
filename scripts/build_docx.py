@@ -65,6 +65,62 @@ def clear_body(doc):
         body.remove(child)
 
 
+def trim_to_content_area(doc):
+    """保留模板封面、目录及目录后的分页/分节符，删除模板的"说明"提示段与正文占位段，
+    使生成的正文写入目录之后的内容区。无法识别模板结构时返回 False（交由调用方回退）。"""
+    body = doc.element.body
+    P, PPR, PSTYLE, VAL = qn('w:p'), qn('w:pPr'), qn('w:pStyle'), qn('w:val')
+    SECTPR, PGBB, BR, TYPE = qn('w:sectPr'), qn('w:pageBreakBefore'), qn('w:br'), qn('w:type')
+
+    def pstyle(el):
+        if el.tag != P:
+            return None
+        s = el.find(PPR + '/' + PSTYLE)
+        return s.get(VAL) if s is not None else ''
+
+    children = list(body.iterchildren())
+    doc_sectpr = body.find(SECTPR)
+
+    first_h1 = next((el for el in children if pstyle(el) == 'Heading1'), None)
+    last_toc = None
+    for el in children:
+        st = pstyle(el)
+        if st and st.startswith('TOC'):
+            last_toc = el
+    if first_h1 is None or last_toc is None:
+        return False
+
+    idx_h1 = children.index(first_h1)
+    idx_toc = children.index(last_toc)
+    if idx_toc >= idx_h1:
+        return False
+
+    # 目录与正文之间带分页/分节的分隔段（保留以维持目录后的分页与分节属性）
+    sep_idx = idx_h1
+    for i in range(idx_toc + 1, idx_h1):
+        el = children[i]
+        if el.tag != P:
+            continue
+        pPr = el.find(PPR)
+        has_sep = pPr is not None and (pPr.find(PGBB) is not None or pPr.find(SECTPR) is not None)
+        if not has_sep and el.find('.//' + BR + '[@' + TYPE + '="page"]') is not None:
+            has_sep = True
+        if has_sep:
+            sep_idx = i
+
+    # 删除目录之后、分隔段之前的"说明"提示段
+    for el in children[idx_toc + 1: sep_idx]:
+        body.remove(el)
+    # 删除正文占位段（第一个一级标题起到末尾），保留文档级 sectPr
+    for el in children[idx_h1:]:
+        if el is doc_sectpr:
+            continue
+        body.remove(el)
+
+    # 未找到分隔段则正文需自带首页分页：让第一个一级标题也段前分页
+    return True if sep_idx != idx_h1 else 'no_sep'
+
+
 def set_font(run, cn=CN_BODY, size=BODY_SIZE, bold=False, superscript=False, en=EN_FONT):
     """显式设置中英文字体、字号，确保与标准报告一致。"""
     run.bold = bold
@@ -314,18 +370,30 @@ def render_md(doc, lines, fig_counter):
         i += 1
 
 
-def build(template, inputs, output, title=None):
+def build(template, inputs, output, title=None, rebuild=False):
     doc = Document(template)
     STYLE_BY_ID.clear()
     H1_SEEN[0] = 0
     for s in doc.styles:
         STYLE_BY_ID[s.style_id] = s
-    clear_body(doc)
 
-    if title:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        set_font(p.add_run(title), CN_HEAD, TITLE_SIZE, bold=True)
+    kept = False
+    if not rebuild:
+        kept = trim_to_content_area(doc)
+        if kept == 'no_sep':
+            H1_SEEN[0] = 1  # 模板无目录后分页符，让第一个一级标题自带分页
+            kept = True
+        if kept:
+            print('已保留模板封面与目录，正文写入内容区')
+        else:
+            print('未识别到模板封面/目录结构，回退为整体重建')
+
+    if not kept:
+        clear_body(doc)
+        if title:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            set_font(p.add_run(title), CN_HEAD, TITLE_SIZE, bold=True)
 
     files = collect_md(inputs)
     if not files:
@@ -345,9 +413,11 @@ def main():
     parser.add_argument('--template', '-t', required=True, help='Word 模板 .docx 路径（提供标题/正文样式）')
     parser.add_argument('--input', '-i', nargs='+', required=True, help='章节 md 目录或文件列表（按顺序合并）')
     parser.add_argument('--output', '-o', required=True, help='输出 .docx 路径')
-    parser.add_argument('--title', default=None, help='可选：文档首行居中标题')
+    parser.add_argument('--title', default=None, help='可选：文档首行居中标题（仅 --rebuild 整体重建时生效）')
+    parser.add_argument('--rebuild', action='store_true',
+                        help='整体重建：清空模板正文（含封面/目录）后重写；默认保留模板封面与目录，仅写入正文内容区')
     args = parser.parse_args()
-    build(args.template, args.input, args.output, args.title)
+    build(args.template, args.input, args.output, args.title, args.rebuild)
 
 
 if __name__ == '__main__':
