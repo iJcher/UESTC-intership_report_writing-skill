@@ -31,6 +31,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_SECTION
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
@@ -51,10 +52,51 @@ HEADING_SIZE = {1: 15.0, 2: 14.0, 3: 14.0, 4: 14.0}  # 一级小三，其余四�
 
 STYLE_BY_ID = {}
 H1_SEEN = [0]  # 一级标题（章）计数：从第二个起段前分页，第一个紧跟文档标题
+FIRST_H1_NEEDS_PAGE_BREAK = [False]
+
+
+def set_section_header(section, title):
+    """给终期报告的章级分节设置页眉，页脚继续继承模板页码字段。"""
+    section.header.is_linked_to_previous = False
+    header = section.header
+    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    p.clear()
+    set_font(p.add_run(title), CN_BODY, 10.5)
+
+
+def start_chapter_section(doc, title):
+    """每个一级标题从新页开始，并与终期范例一样使用本章页眉。"""
+    if H1_SEEN[0] > 1:
+        section = doc.add_section(WD_SECTION.NEW_PAGE)
+    else:
+        section = doc.sections[-1]
+    set_section_header(section, title)
 
 
 def get_style(style_id):
     return STYLE_BY_ID.get(style_id)
+
+
+def get_heading_style(level):
+    """兼容 Word 模板中 Heading 样式的不同内部 ID（如 `1` 或 `Heading1`）。"""
+    expected_name = f'Heading {level}'
+    for style in STYLE_BY_ID.values():
+        if style.name == expected_name:
+            return style
+    return get_style(f'Heading{level}')
+
+
+def get_heading_style_id(level):
+    style = get_heading_style(level)
+    return style.style_id if style is not None else f'Heading{level}'
+
+
+def is_toc_style_id(style_id):
+    """兼容 `TOC1`、`11` 等 Word 自动目录样式 ID。"""
+    if not style_id:
+        return False
+    style = get_style(style_id)
+    return style_id.upper().startswith('TOC') or (style is not None and style.name.lower().startswith('toc'))
 
 
 def clear_body(doc):
@@ -81,11 +123,12 @@ def trim_to_content_area(doc):
     children = list(body.iterchildren())
     doc_sectpr = body.find(SECTPR)
 
-    first_h1 = next((el for el in children if pstyle(el) == 'Heading1'), None)
+    h1_style_id = get_heading_style_id(1)
+    first_h1 = next((el for el in children if pstyle(el) == h1_style_id), None)
     last_toc = None
     for el in children:
         st = pstyle(el)
-        if st and st.startswith('TOC'):
+        if is_toc_style_id(st):
             last_toc = el
     if first_h1 is None or last_toc is None:
         return False
@@ -318,17 +361,17 @@ def render_md(doc, lines, fig_counter):
         m = re.match(r'^(#{1,4})\s+(.*)$', stripped)
         if m:
             level = len(m.group(1))
-            p = doc.add_paragraph()
-            hs = get_style(f'Heading{level}')
-            if hs is not None:
-                p.style = hs
             if level == 1:
                 H1_SEEN[0] += 1
-                if H1_SEEN[0] > 1:
-                    pPr = p._p.get_or_add_pPr()
-                    if pPr.find(qn('w:pageBreakBefore')) is None:
-                        pPr.insert(0, OxmlElement('w:pageBreakBefore'))
-                print(f'  [章] 第{H1_SEEN[0]}个一级标题 "{m.group(2)[:16]}" 段前分页={H1_SEEN[0] > 1}')
+                start_chapter_section(doc, m.group(2))
+                print(f'  [章] 第{H1_SEEN[0]}个一级标题 "{m.group(2)[:16]}" 新建分节={H1_SEEN[0] > 1}')
+            p = doc.add_paragraph()
+            hs = get_heading_style(level)
+            if hs is not None:
+                p.style = hs
+            if level == 1 and H1_SEEN[0] == 1 and FIRST_H1_NEEDS_PAGE_BREAK[0]:
+                pPr = p._p.get_or_add_pPr()
+                pPr.insert(0, OxmlElement('w:pageBreakBefore'))
             set_font(p.add_run(m.group(2)), CN_HEAD, HEADING_SIZE.get(level, 14.0))
             i += 1
             continue
@@ -374,6 +417,7 @@ def build(template, inputs, output, title=None, rebuild=False):
     doc = Document(template)
     STYLE_BY_ID.clear()
     H1_SEEN[0] = 0
+    FIRST_H1_NEEDS_PAGE_BREAK[0] = False
     for s in doc.styles:
         STYLE_BY_ID[s.style_id] = s
 
@@ -381,7 +425,7 @@ def build(template, inputs, output, title=None, rebuild=False):
     if not rebuild:
         kept = trim_to_content_area(doc)
         if kept == 'no_sep':
-            H1_SEEN[0] = 1  # 模板无目录后分页符，让第一个一级标题自带分页
+            FIRST_H1_NEEDS_PAGE_BREAK[0] = True
             kept = True
         if kept:
             print('已保留模板封面与目录，正文写入内容区')
