@@ -25,6 +25,7 @@ import base64
 import argparse
 import tempfile
 import urllib.request
+from copy import deepcopy
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
@@ -53,15 +54,43 @@ HEADING_SIZE = {1: 15.0, 2: 14.0, 3: 14.0, 4: 14.0}  # 一级小三，其余四�
 STYLE_BY_ID = {}
 H1_SEEN = [0]  # 一级标题（章）计数：从第二个起段前分页，第一个紧跟文档标题
 FIRST_H1_NEEDS_PAGE_BREAK = [False]
+HEADER_PROTOTYPES = {}
+
+
+def header_prototype(doc, attr):
+    """Find a non-empty template header for a header variant."""
+    for section in doc.sections:
+        header = getattr(section, attr)
+        if header.paragraphs and header.paragraphs[0].text.strip():
+            return header.paragraphs[0]
+    return None
+
+
+def set_header_text(header, title, prototype=None):
+    """Write a chapter title while retaining the template header's paragraph rule."""
+    header.is_linked_to_previous = False
+    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    ppr = deepcopy(prototype._p.pPr) if prototype is not None and prototype._p.pPr is not None else None
+    rpr = (deepcopy(prototype.runs[0]._r.rPr)
+           if prototype is not None and prototype.runs and prototype.runs[0]._r.rPr is not None else None)
+    if ppr is not None:
+        old = p._p.pPr
+        if old is not None:
+            p._p.remove(old)
+        p._p.insert(0, ppr)
+    p.clear()
+    run = p.add_run(title)
+    if rpr is not None:
+        run._r.get_or_add_rPr().append(rpr)
+    else:
+        set_font(run, CN_BODY, 10.5)
 
 
 def set_section_header(section, title):
-    """给终期报告的章级分节设置页眉，页脚继续继承模板页码字段。"""
-    section.header.is_linked_to_previous = False
-    header = section.header
-    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
-    p.clear()
-    set_font(p.add_run(title), CN_BODY, 10.5)
+    """Keep default, even and first-page headers from falling back to prior sections."""
+    set_header_text(section.header, title, HEADER_PROTOTYPES.get('header'))
+    set_header_text(section.even_page_header, title, HEADER_PROTOTYPES.get('even_page_header'))
+    set_header_text(section.first_page_header, title, HEADER_PROTOTYPES.get('first_page_header'))
 
 
 def start_chapter_section(doc, title):
@@ -249,9 +278,13 @@ def add_image(doc, png_bytes, max_cm=15.0):
         run = p.add_run()
         if w:
             cm_w = w / 96 * 2.54
-            run.add_picture(tmp, width=Cm(min(cm_w, max_cm)))
+            shape = run.add_picture(tmp, width=Cm(min(cm_w, max_cm)))
         else:
-            run.add_picture(tmp, width=Cm(max_cm))
+            shape = run.add_picture(tmp, width=Cm(max_cm))
+        # A caption is added by the Markdown renderer. The image still needs a
+        # non-empty description for assistive technologies and document audits.
+        shape._inline.docPr.set('descr', '报告工程图')
+        shape._inline.docPr.set('title', '报告工程图')
     finally:
         os.remove(tmp)
 
@@ -304,7 +337,21 @@ def add_table(doc, rows):
             cells[ci].text = ''
             run = cells[ci].paragraphs[0].add_run(txt)
             set_font(run, CN_BODY, TABLE_SIZE, bold=(ri == 0))
+    tr_pr = table.rows[0]._tr.get_or_add_trPr()
+    header = OxmlElement('w:tblHeader')
+    header.set(qn('w:val'), 'true')
+    tr_pr.append(header)
     return table
+
+
+def request_word_field_update(doc):
+    """Ask Word/WPS to refresh TOC and page fields when the file is opened."""
+    settings = doc.settings.element
+    node = settings.find(qn('w:updateFields'))
+    if node is None:
+        node = OxmlElement('w:updateFields')
+        settings.append(node)
+    node.set(qn('w:val'), 'true')
 
 
 def split_table_row(line):
@@ -418,6 +465,11 @@ def build(template, inputs, output, title=None, rebuild=False):
     STYLE_BY_ID.clear()
     H1_SEEN[0] = 0
     FIRST_H1_NEEDS_PAGE_BREAK[0] = False
+    HEADER_PROTOTYPES.clear()
+    for attr in ('header', 'even_page_header', 'first_page_header'):
+        prototype = header_prototype(doc, attr)
+        if prototype is not None:
+            HEADER_PROTOTYPES[attr] = prototype
     for s in doc.styles:
         STYLE_BY_ID[s.style_id] = s
 
@@ -448,8 +500,9 @@ def build(template, inputs, output, title=None, rebuild=False):
         with open(path, encoding='utf-8') as f:
             render_md(doc, f.read().split('\n'), fig_counter)
 
+    request_word_field_update(doc)
     doc.save(output)
-    print(f'\n已生成: {output}（共 {fig_counter[0]} 张图）')
+    print(f'\n已生成: {output}（共 {fig_counter[0]} 张图）。请在 Word/WPS 更新域并按最终分页核验目录页码。')
 
 
 def main():
